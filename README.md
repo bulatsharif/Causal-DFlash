@@ -1,68 +1,50 @@
 # Causal-DFlash
 
-**Target-conditioned causal diffusion drafter for speculative decoding**
+**Каузальный диффузионный драфтер с обусловливанием на основной модели для спекулятивного декодирования**
 
-Causal-DFlash is a research project exploring whether the parallel drafting mechanism of
-[DFlash](https://arxiv.org/abs/2602.06036) can be combined with the cache-friendly causal
-diffusion architecture introduced in [WeDLM](https://arxiv.org/abs/2512.22737).
+Causal-DFlash — исследовательский проект, в котором изучается возможность объединить параллельный диффузионный драфтинг из
+[DFlash](https://arxiv.org/abs/2602.06036) с cache-friendly архитектурой на основе стандартного causal attention из
+[WeDLM](https://arxiv.org/abs/2512.22737).
 
-The main goal is to build a lightweight diffusion drafter that predicts several future tokens
-in parallel while remaining compatible with standard causal attention, KV caching, and
-optimized autoregressive inference engines.
+Цель проекта — разработать лёгкий диффузионный драфтер, который параллельно генерирует несколько будущих токенов, использует скрытые представления основной LLM и остаётся совместимым со стандартным KV-кэшем и оптимизированными движками инференса.
 
-> Research project for **Summer with AIRI 2026 — Efficient Deep Learning track**.
+> Исследовательский проект для программы **«Лето с AIRI 2026»**, направление Efficient Deep Learning.
 
 ---
 
-## Motivation
+## Мотивация
 
-Speculative decoding accelerates LLM inference by using a small draft model to propose several
-future tokens, which are then verified in parallel by the target LLM.
+Спекулятивное декодирование ускоряет генерацию LLM с помощью небольшой черновой модели — драфтера. Драфтер предлагает несколько будущих токенов, после чего основная модель проверяет их одним параллельным проходом.
 
-DFlash improves drafting latency by replacing an autoregressive drafter with a lightweight block
-diffusion model. However, its block-wise bidirectional attention is not naturally compatible with
-standard prefix KV caching, and its practical speedup may vary substantially across tasks and
-serving configurations.
+DFlash заменяет последовательный авторегрессионный драфтер на лёгкую блоковую диффузионную модель. Такой драфтер может генерировать несколько токенов параллельно, однако двунаправленное внимание внутри диффузионного блока плохо совместимо со стандартным prefix KV caching. Кроме того, практическое ускорение DFlash может заметно зависеть от типа задачи, batch size и особенностей serving-системы.
 
-WeDLM demonstrates that diffusion-style generation can operate under standard causal attention
-through topological reordering. This makes predicted tokens immediately cache-compatible and
-allows the model to use existing inference infrastructure such as FlashAttention, PagedAttention,
-and CUDA Graphs.
+WeDLM показывает, что диффузионное восстановление масок можно реализовать с обычным causal attention при помощи Topological Reordering. Это позволяет использовать стандартные механизмы KV-кэширования, FlashAttention, PagedAttention и CUDA Graphs.
 
-Causal-DFlash investigates whether these ideas can be transferred to a small target-conditioned
-speculative drafter.
+Causal-DFlash исследует, можно ли перенести эти идеи в компактный target-conditioned драфтер для спекулятивного декодирования.
 
 ---
 
-## Proposed Architecture
+## Предлагаемая архитектура
 
 <p align="center">
-  <img src="assets/causal_dflash_architecture.png"
-       alt="Causal-DFlash architecture"
-       width="900">
+  <img
+    src="assets/causal_dflash_architecture.png"
+    alt="Архитектура Causal-DFlash"
+    width="900"
+  >
 </p>
 
-The proposed pipeline consists of four stages:
+Предлагаемый метод состоит из четырёх основных этапов.
 
-1. **Target context extraction**
+### 1. Извлечение контекста основной модели
 
-   The target LLM processes the current prefix. Hidden states from several target-model layers
-   are fused into compact context features.
+Target LLM выполняет prefill текущего префикса. Скрытые состояния нескольких её слоёв объединяются при помощи небольшого проекционного слоя и образуют `target context features`.
 
-2. **Causal diffusion drafting**
+Эти признаки передаются в каждый слой драфтера через KV injection.
 
-   A lightweight drafter receives the current prefix followed by a fixed window of masked
-   positions. Target context features are injected into every draft layer through KV projections.
+### 2. Инициализация draft-блока
 
-3. **Multi-step draft generation**
+К текущему префиксу добавляется окно из маскированных позиций:
 
-   Topological reordering places currently observed tokens before unresolved masks while
-   preserving their logical position IDs. The drafter progressively resolves the complete draft
-   block over several internal diffusion steps.
-
-   For example, an 8-token block may be generated as:
-
-   ```text
-   Step 1: +3 tokens  → 3 / 8 resolved
-   Step 2: +2 tokens  → 5 / 8 resolved
-   Step 3: +3 tokens  → 8 / 8 resolved
+```text
+Текущий префикс + [MASK] × 8
